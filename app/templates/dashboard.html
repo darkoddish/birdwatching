@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+  <!-- Main Left Column -->
+  <div class="col-lg-8">
+    <div class="mb-3">
+      <h5>Live Stream</h5>
+      <div class="border p-2 bg-light" style="height: 360px;">
+        <!-- Replace with actual stream <img> or <video> -->
+        <p class="text-center text-muted">Live video feed goes here</p>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="col-md-4">
+        <h6>PTZ Controls</h6>
+        <form method="post" action="/control">
+          <div class="d-grid gap-2 mb-2">
+            <button name="direction" value="up" class="btn btn-secondary">Up</button>
+			<div class="d-flex justify-content-between">
+			  <button name="direction" value="left" class="btn btn-secondary w-100 me-1">Left</button>
+			  <button name="direction" value="right" class="btn btn-secondary w-100 ms-1">Right</button>
+			</div>
+            <button name="direction" value="down" class="btn btn-secondary">Down</button>
+            <button name="direction" value="zoom_in" class="btn btn-secondary">Zoom In</button>
+            <button name="direction" value="zoom_out" class="btn btn-secondary">Zoom Out</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="col-md-8">
+        <h6>Logs</h6>
+        <div class="border p-2 bg-white" style="height: 200px; overflow-y: scroll;">
+          <ul class="list-unstyled mb-0">
+            {% for log in logs %}
+              <li><strong>{{ log.timestamp }}</strong> — {{ log.event }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Events Column -->
+  <div class="col-lg-4">
+    <h5>Recent Events</h5>
+    <div class="border p-2 bg-white" style="height: 600px; overflow-y: scroll;">
+      <ul class="list-group">
+        {% for event in events %}
+          <li class="list-group-item">{{ event.timestamp }} — {{ event.description }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+
+{% block title %}Events – Birdwatch AI{% endblock %}
+
+{% block content %}
+<h2>Detection Events</h2>
+<div class="border p-3 bg-white" style="height: 600px; overflow-y: auto;">
+  <ul class="list-group">
+    {% for event in events %}
+      <li class="list-group-item">
+        <strong>{{ event.timestamp }}</strong> — {{ event.description }}
+      </li>
+    {% else %}
+      <li class="list-group-item text-muted">No events recorded.</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endblock %}
