@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+
+{% block title %}Logs – Birdwatch AI{% endblock %}
+
+{% block content %}
+<h2>System Logs</h2>
+<div class="border p-3 bg-white" style="height: 600px; overflow-y: auto;">
+  <ul class="list-group">
+    {% for log in logs %}
+      <li class="list-group-item">
+        <strong>{{ log.timestamp }}</strong> — {{ log.event }}
+      </li>
+    {% else %}
+      <li class="list-group-item text-muted">No logs recorded.</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endblock %}

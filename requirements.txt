@@ -1,0 +1,5 @@
+flask
+opencv-python
+onvif-zeep
+ffmpeg-python
+flask-socketio

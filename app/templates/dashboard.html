@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container-fluid">
+  <div class="row">
+    <!-- Live Stream -->
+    <div class="col-lg-8 mb-3">
+      <h5>Live Stream</h5>
+      <div class="border bg-light p-2" style="height: 360px;">
+        <img src="{{ url_for('video_feed') }}" class="img-fluid" alt="Live video feed">
+      </div>
+    </div>
+
+    <!-- PTZ Controls -->
+    <div class="col-lg-4 mb-3">
+      <h5>PTZ Controls</h5>
+      <form id="ptz-form">
+        <div class="mb-3">
+          <label for="seconds" class="form-label">Movement Duration (Seconds)</label>
+          <select class="form-select" id="seconds" name="seconds">
+            {% for i in range(0, 11) %}
+              <option value="{{ i / 10 }}" {% if i == 5 %}selected{% endif %}>{{ i / 10 }}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="mb-3 d-flex justify-content-center">
+          <button type="button" class="btn btn-secondary mx-1" onclick="sendPTZCommand('up')">⬆️</button>
+        </div>
+        <div class="mb-3 d-flex justify-content-center">
+          <button type="button" class="btn btn-secondary mx-1" onclick="sendPTZCommand('left')">⬅️</button>
+          <button type="button" class="btn btn-secondary mx-1" onclick="sendPTZCommand('right')">➡️</button>
+        </div>
+        <div class="mb-3 d-flex justify-content-center">
+          <button type="button" class="btn btn-secondary mx-1" onclick="sendPTZCommand('down')">⬇️</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Logs -->
+    <div class="col-lg-12 mt-3">
+      <h5>Logs</h5>
+      <div class="border p-2 bg-white" style="height: 200px; overflow-y: scroll;">
+        <ul class="list-unstyled mb-0" id="log-list">
+          {% for log in logs %}
+            <li><strong>{{ log.timestamp }}</strong> — {{ log.event }}</li>
+          {% else %}
+            <li class="text-muted">No logs available.</li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+
+    <!-- Events -->
+    <div class="col-lg-12 mt-3">
+      <h5>Recent Events</h5>
+      <div class="border p-2 bg-white" style="height: 600px; overflow-y: scroll;">
+        <ul class="list-group">
+          {% for event in events %}
+            <li class="list-group-item">{{ event.timestamp }} — {{ event.description }}</li>
+          {% else %}
+            <li class="list-group-item text-muted">No recent events.</li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- PTZ functions -->
+<script>
+  async function sendPTZCommand(direction) {
+    const seconds = parseFloat(document.getElementById('seconds').value);
+    const velocity = 1.0; // constant velocity
+    let pan = 0, tilt = 0;
+
+    switch (direction) {
+      case 'left':  pan = -velocity; break;
+      case 'right': pan = velocity; break;
+      case 'up':    tilt = velocity; break;
+      case 'down':  tilt = -velocity; break;
+    }
+
+    try {
+      await fetch('/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pan, tilt, seconds ,command_type: "start"})
+      });
+
+    } catch (err) {
+      console.error("Failed to send PTZ command", err);
+    }
+  }
+</script>
+
+<!-- Socket.IO and real-time log updates -->
+<script src="https://cdn.socket.io/4.5.4/socket.io.min.js" crossorigin="anonymous"></script>
+
+<script>
+  const socket = io();
+  console.log("Attempting Socket.IO connection...");
+
+  socket.on('connect', () => {
+    console.log("✅ Connected to Socket.IO server");
+  });
+
+  socket.on('disconnect', () => {
+    console.warn("❌ Disconnected from Socket.IO server");
+  });
+
+  socket.on('new_log', function (log) {
+    console.log("📝 Received log via socket:", log);
+    const logList = document.getElementById('log-list');
+    if (!logList) return;
+
+    const li = document.createElement('li');
+    li.innerHTML = `<strong>${log.timestamp}</strong> — ${log.event}`;
+    logList.prepend(li);
+  });
+</script>
+{% endblock %}

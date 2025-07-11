@@ -1,0 +1,16 @@
+body {
+  background-color: #f8f9fa;
+}
+
+.sidebar {
+  min-width: 200px;
+  height: 100vh;
+}
+
+#wrapper {
+  display: flex;
+}
+
+#page-content {
+  flex-grow: 1;
+}
