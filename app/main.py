@@ -1,18 +1,114 @@
-from flask import Flask, render_template, request, redirect, url_for, Response, jsonify
+from flask import Flask, render_template, request, redirect, url_for, Response, jsonify, send_file
 from onvif import ONVIFCamera
-from config import RTSP_USERNAME, RTSP_PASSWORD, RTSP_IP, RTSP_PORT, RTSP_STREAM_PATH_MAIN, RTSP_STREAM_PATH_SUB
 from flask_socketio import SocketIO, emit
-from collections import deque
+from bird_classifier.bird_classifier import classify_species_chriamue
+import requests
+from datetime import datetime
 import cv2
 import urllib.parse
 import time
 import psutil
+from config import *
+import os
+from ultralytics import YOLO
+import sqlite3
 
 app = Flask(__name__)
 socketio = SocketIO(app, async_mode='threading')
 
+camera = ONVIFCamera(CAMERA_01_IP, CAMERA_01_ONVIF_PORT, CAMERA_01_USERNAME, CAMERA_01_PASSWORD)
+media_service = camera.create_media_service()
+ptz_service = camera.create_ptz_service()
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SNAPSHOT_DIR = os.path.join(BASE_DIR, "static", "snapshots")
+CROPS_DIR = os.path.join(BASE_DIR, "static", "crops")
+model = YOLO(MODEL_PATH_01)
+
+print("BASE_DIR =", BASE_DIR)
+print("CROPS_DIR =", CROPS_DIR)
+print("SNAPSHOT_DIR =", SNAPSHOT_DIR)
+
 logs_store = []
 events_store = []
+
+DB_PATH = os.path.join(BASE_DIR, "data", "birdwatch.db")
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS detections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT,
+        label TEXT,
+        confidence REAL,
+        bbox TEXT,
+        original_path TEXT,
+        crop_path TEXT,
+        species TEXT
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+def insert_detection(label, confidence, bbox, original_path, crop_path, species=None):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+    INSERT INTO detections (timestamp, label, confidence, bbox, original_path, crop_path, species)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        datetime.now().isoformat(),
+        label,
+        confidence,
+        str(bbox),
+        original_path,
+        crop_path,
+        species
+    ))
+    conn.commit()
+    conn.close()
+
+def get_recent_detections(limit=50):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+    SELECT timestamp, label, confidence, crop_path, species FROM detections
+    ORDER BY timestamp DESC LIMIT ?
+    """, (limit,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def detect_and_crop(image_path):
+    image = cv2.imread(image_path)
+    results = model(image)
+
+    detections = []
+    for i, r in enumerate(results):
+        boxes = r.boxes
+        for j, box in enumerate(boxes):
+            cls_id = int(box.cls[0])
+            conf = float(box.conf[0])
+            label = model.names[cls_id]
+
+            # Bounding box coordinates
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            crop = image[y1:y2, x1:x2]
+            crop_filename = f"{os.path.splitext(os.path.basename(image_path))[0]}_crop_{label}_{j}.jpg"
+            crop_path = os.path.join(CROPS_DIR, crop_filename)
+            cv2.imwrite(crop_path, crop)
+
+            detections.append({
+                "label": label,
+                "confidence": round(conf, 3),
+                "bbox": [x1, y1, x2, y2],
+                "crop_path": crop_path
+            })
+
+    return detections
 
 def log_event(message):
     log_entry = {
@@ -25,10 +121,6 @@ def log_event(message):
 @app.route('/')
 def dashboard():
     return render_template('dashboard.html', logs=reversed(logs_store), events=reversed(events_store))
-
-camera = ONVIFCamera(RTSP_IP, 8000, RTSP_USERNAME, RTSP_PASSWORD)
-media_service = camera.create_media_service()
-ptz_service = camera.create_ptz_service()
 
 @app.route('/control', methods=['POST'])
 def control():
@@ -63,18 +155,10 @@ def control():
         log_event(f"PTZ control error: {str(e)}")
         return jsonify({'error': 'PTZ control failed'}), 500
 
-@app.route('/live_stream')
-def live_stream():
-    return render_template('live_stream.html')
-
-@app.route('/processed_stream')
-def processed_stream():
-    return Response(gen_processed_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
-
 @app.route('/status', methods=['GET'])
 def get_ptz_status():
     try:
-        camera = ONVIFCamera(RTSP_IP, 8000, RTSP_USERNAME, RTSP_PASSWORD)
+        camera = ONVIFCamera(CAMERA_01_IP, CAMERA_01_ONVIF_PORT, CAMERA_01_USERNAME, CAMERA_01_PASSWORD)
         log_event("Connected to ONVIFCamera for status")
         media_service = camera.create_media_service()
         ptz_service = camera.create_ptz_service()
@@ -89,7 +173,7 @@ def get_ptz_status():
 def camera_diagnostics():
     diagnostics = {}
     try:
-        camera = ONVIFCamera(RTSP_IP, 8000, RTSP_USERNAME, RTSP_PASSWORD)
+        camera = ONVIFCamera(CAMERA_01_IP, CAMERA_01_ONVIF_PORT, CAMERA_01_USERNAME, CAMERA_01_PASSWORD)
         log_event("Connected to ONVIFCamera for diagnostics")
         media_service = camera.create_media_service()
         ptz_service = camera.create_ptz_service()
@@ -137,12 +221,60 @@ def events():
 
 @app.route('/snapshots')
 def snapshots():
-    return "<h2>Snapshots page coming soon</h2>"
+    detections = get_recent_detections(100)
+    return render_template('snapshots.html', detections=detections)
 
-def gen_frames():
-    username = urllib.parse.quote(RTSP_USERNAME)
-    password = urllib.parse.quote(RTSP_PASSWORD)
-    rtsp_url = f'rtsp://{username}:{password}@{RTSP_IP}:{RTSP_PORT}/{RTSP_STREAM_PATH_SUB}'
+@app.route('/snapshot', methods=['POST'])
+def snapshot():
+    url = f"http://{CAMERA_01_IP}/cgi-bin/api.cgi"
+    params = {
+        "cmd": "Snap",
+        "channel": 0,
+        "rs": "abc123",
+        "user": CAMERA_01_USERNAME,
+        "password": CAMERA_01_PASSWORD
+    }
+
+    try:
+        response = requests.get(url, params=params, stream=True, timeout=10)
+        if response.status_code == 200:
+            filename = datetime.now().strftime("snapshot_%Y%m%d_%H%M%S.jpg")
+            filepath = os.path.join(SNAPSHOT_DIR, filename)
+            with open(filepath, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            log_event(f"Snapshot taken and saved to {filepath}")
+            detections = detect_and_crop(filepath)
+            log_event(f"Detected {len(detections)} objects in {filepath}")
+            for det in detections:
+                species = None
+                #if det['label'] == 'bird':
+                if 1 == 1:
+                    log_event(f"Triggering species classifier for {det['crop_path']}")
+                    label, conf = classify_species_chriamue(det['crop_path'])
+                    log_event(f"Species: {label} ({conf})")
+                else:
+                    species = None
+                insert_detection(
+                    label=det['label'],
+                    confidence=det['confidence'],
+                    bbox=det['bbox'],
+                    original_path=filepath,
+                    crop_path=det['crop_path'],
+                    species=species
+                )
+            return jsonify({'success': f'Snapshot saved as {filename}'}), 200
+        else:
+            log_event(f"Snapshot failed with status code: {response.status_code}")
+            return jsonify({'error': f'Snapshot failed: {response.status_code}'}), 500
+    except Exception as e:
+        log_event(f"Snapshot error: {str(e)}")
+        return jsonify({'error': f'Error: {str(e)}'}), 500
+
+def gen_frames_sub():
+    username = urllib.parse.quote(CAMERA_01_USERNAME)
+    password = urllib.parse.quote(CAMERA_01_PASSWORD)
+    rtsp_url = f'rtsp://{username}:{password}@{CAMERA_01_IP}:{CAMERA_01_RTSP_PORT}/{CAMERA_01_RTSP_STREAM_PATH_SUB}'
     camera = cv2.VideoCapture(rtsp_url)
     if not camera.isOpened():
         log_event("Camera not accessible (failed to open RTSP stream)")
@@ -159,63 +291,10 @@ def gen_frames():
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
-def gen_processed_frames():
-    username = urllib.parse.quote(RTSP_USERNAME)
-    password = urllib.parse.quote(RTSP_PASSWORD)
-    rtsp_url = f'rtsp://{username}:{password}@{RTSP_IP}:{RTSP_PORT}/{RTSP_STREAM_PATH_MAIN}'
-
-    def open_camera():
-        cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
-        if not cap.isOpened():
-            log_event("Camera not accessible (failed to open RTSP stream for processed view)")
-            return None
-        log_event("Camera accessed successfully for processed stream")
-        return cap
-
-    camera = open_camera()
-    last_reset = time.time()
-    read_failures = 0
-
-    while True:
-        if camera is None:
-            time.sleep(1)
-            camera = open_camera()
-            continue
-
-        grabbed = camera.grab()
-        if not grabbed:
-            read_failures += 1
-            log_event(f"[Grab Fail] Attempt #{read_failures} | Elapsed: {time.time() - last_reset:.2f}s")
-            if read_failures >= 5 or time.time() - last_reset > 5:
-                log_event("[Stream Reset] Too many failures or stalled. Reinitializing camera.")
-                log_event(f"[System Stats] CPU: {psutil.cpu_percent()}%, RAM: {psutil.virtual_memory().percent}%")
-                camera.release()
-                camera = open_camera()
-                last_reset = time.time()
-                read_failures = 0
-            continue
-
-        success, frame = camera.retrieve()
-        if not success:
-            read_failures += 1
-            log_event(f"[Retrieve Fail] Attempt #{read_failures}")
-            continue
-
-        read_failures = 0
-        ret, buffer = cv2.imencode('.jpg', frame)
-        if not ret:
-            log_event("[Encoding Fail] Could not encode frame.")
-            continue
-
-        frame = buffer.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-
-        time.sleep(2)
-
 @app.route('/video_feed')
 def video_feed():
-    return Response(gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    return Response(gen_frames_sub(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000, debug=True)
+    init_db()

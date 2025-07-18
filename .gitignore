@@ -1,1 +1,40 @@
+# Python
+app/__pycache__/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Virtual environments
+venv/
 venv_bw/
+.env/
+
+# Models
+app/bird_classifier/**/*.onnx
+app/bird_classifier/**/*.csv
+yolov8n.pt
+
+# SQLite DB (optional, if it's large or test-only)
+app/data
+*.db
+*.sqlite3
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Tokens or credentials
+app/config.py
+
+#tests
+app/test.py
+
+#folders bu not files
+app/static/snapshots/*
+!app/static/snapshots/.gitkeep
+app/static/crops/*
+!app/static/crops/.gitkeep
