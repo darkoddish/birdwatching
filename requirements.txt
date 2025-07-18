@@ -4,3 +4,6 @@ onvif-zeep
 ffmpeg-python
 flask-socketio
 psutil
+pillow
+onnxruntime
+numpy
