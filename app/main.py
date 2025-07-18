@@ -23,7 +23,9 @@ ptz_service = camera.create_ptz_service()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SNAPSHOT_DIR = os.path.join(BASE_DIR, "static", "snapshots")
 CROPS_DIR = os.path.join(BASE_DIR, "static", "crops")
-model = YOLO(MODEL_PATH_01)
+GENERAL_CLASSIFIER_PATH = os.path.join(BASE_DIR, "general_classifier", "yolov8n.pt")
+
+model = YOLO(GENERAL_CLASSIFIER_PATH)
 
 print("BASE_DIR =", BASE_DIR)
 print("CROPS_DIR =", CROPS_DIR)
