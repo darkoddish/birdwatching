@@ -11,10 +11,6 @@ venv/
 venv_bw/
 .env/
 
-# Snapshots and crops
-app/static/snapshots/
-app/static/crops/
-
 # Models
 app/bird_classifier/**/*.onnx
 app/bird_classifier/**/*.csv
@@ -36,3 +32,9 @@ app/config.py
 
 #tests
 app/test.py
+
+#folders bu not files
+app/static/snapshots/*
+!app/static/snapshots/.gitkeep
+app/static/crops/*
+!app/static/crops/.gitkeep
