@@ -3,6 +3,29 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <style>
+  html, body {
+    height: 100%;
+    margin: 0;
+  }
+
+  #wrapper {
+    height: 100vh;
+  }
+
+  .sidebar {
+    width: 220px;
+    min-height: 100vh;
+    position: fixed;
+    top: 0;
+    left: 0;
+  }
+
+  #page-content {
+    margin-left: 220px;
+    width: calc(100% - 220px);
+  }
+  </style>
   <title>{% block title %}Birdwatch AI{% endblock %}</title>
 
   <!-- Bootstrap CSS -->
@@ -23,6 +46,7 @@
         <li class="nav-item"><a class="nav-link text-white" href="/logs">Logs</a></li>
         <li class="nav-item"><a class="nav-link text-white" href="/events">Events</a></li>
         <li class="nav-item"><a class="nav-link text-white" href="/snapshots">Snapshots</a></li>
+        <li class="nav-item"><a class="nav-link text-white" href="/detections">Detections</a></li>
         <li class="nav-item"><a class="nav-link text-white" href="/camera_diagnostics">Camera Diagnostics</a></li>
       </ul>
     </div>

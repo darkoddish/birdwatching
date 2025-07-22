@@ -12,6 +12,7 @@ from config import *
 import os
 from ultralytics import YOLO
 import sqlite3
+import threading
 
 app = Flask(__name__)
 socketio = SocketIO(app, async_mode='threading')
@@ -37,6 +38,19 @@ events_store = []
 DB_PATH = os.path.join(BASE_DIR, "data", "birdwatch.db")
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
+def run_periodic_snapshots(interval_seconds=300):
+    def snapshot_loop():
+        while True:
+            try:
+                with app.app_context():
+                    requests.post("http://localhost:5000/snapshot")
+            except Exception as e:
+                log_event(f"Periodic snapshot error: {e}")
+            time.sleep(interval_seconds)
+
+    thread = threading.Thread(target=snapshot_loop, daemon=True)
+    thread.start()
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -55,30 +69,44 @@ def init_db():
     conn.commit()
     conn.close()
 
-def insert_detection(label, confidence, bbox, original_path, crop_path, species=None):
+def get_manual_labels_for_snapshots():
     conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-    INSERT INTO detections (timestamp, label, confidence, bbox, original_path, crop_path, species)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        datetime.now().isoformat(),
-        label,
-        confidence,
-        str(bbox),
-        original_path,
-        crop_path,
-        species
-    ))
-    conn.commit()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT snapshot_id, x, y, width, height, label
+        FROM manual_labels
+    """)
+    rows = cur.fetchall()
     conn.close()
+
+    # organize by snapshot_id
+    label_map = {}
+    for row in rows:
+        sid = row[0]
+        label_data = {
+            'x': row[1],
+            'y': row[2],
+            'width': row[3],
+            'height': row[4],
+            'label': row[5]
+        }
+        label_map.setdefault(sid, []).append(label_data)
+    return label_map
 
 def get_recent_detections(limit=50):
     conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
     c = conn.cursor()
-    c.execute("""
-    SELECT timestamp, label, confidence, crop_path, species FROM detections
-    ORDER BY timestamp DESC LIMIT ?
+    c.execute(f"""
+        SELECT s.timestamp, d.label, d.confidence, d.crop_path, d.species,
+               d.feedback, d.feedback_notes,
+               EXISTS (
+                   SELECT 1 FROM manual_labels ml WHERE ml.snapshot_id = d.snapshot_id
+               ) as has_manual
+        FROM detections d
+        JOIN snapshots s ON d.snapshot_id = s.id
+        ORDER BY s.timestamp DESC
+        LIMIT ?
     """, (limit,))
     rows = c.fetchall()
     conn.close()
@@ -221,10 +249,124 @@ def logs():
 def events():
     return render_template('events.html', events=reversed(events_store))
 
-@app.route('/snapshots')
-def snapshots():
-    detections = get_recent_detections(100)
-    return render_template('snapshots.html', detections=detections)
+@app.route('/feedback_missed', methods=['POST'])
+def feedback_missed():
+    snapshot_path = request.form['snapshot_path']
+    missed_label = request.form['missed_label']
+    timestamp = extract_timestamp_from_filename(snapshot_path)
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO feedback_missed (snapshot_path, label, timestamp)
+        VALUES (?, ?, ?)
+    """, (snapshot_path, missed_label, timestamp))
+    conn.commit()
+    conn.close()
+
+    return redirect(request.referrer or url_for('snapshots'))
+
+@app.route('/feedback_wrong', methods=['POST'])
+def feedback_wrong():
+    detection_id_raw = request.form.get('detection_id', '').strip()
+    if not detection_id_raw.isdigit():
+        log_event("Invalid detection_id in feedback_wrong")
+        return redirect(request.referrer or url_for('detections'))
+
+    detection_id = int(detection_id_raw)
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE detections
+        SET feedback = 'wrong'
+        WHERE id = ?
+    """, (detection_id,))
+    conn.commit()
+    conn.close()
+    log_event(f"Marked detection {detection_id} as wrong")
+    return redirect(request.referrer or url_for('detections'))
+
+@app.route('/feedback_ignore', methods=['POST'])
+def feedback_ignore():
+    detection_id_raw = request.form.get('detection_id', '').strip()
+    if not detection_id_raw.isdigit():
+        log_event("Invalid detection_id in feedback_ignore")
+        return redirect(request.referrer or url_for('detections'))
+
+    detection_id = int(detection_id_raw)
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE detections
+        SET feedback = 'ignore'
+        WHERE id = ?
+    """, (detection_id,))
+    conn.commit()
+    conn.close()
+    log_event(f"Marked detection {detection_id} as ignore")
+    return redirect(request.referrer or url_for('detections'))
+
+def get_snapshots_list():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, timestamp, filename, path
+        FROM snapshots
+        ORDER BY timestamp DESC
+        LIMIT 100
+    """)
+    rows = cur.fetchall()
+    conn.close()
+
+    # Convert to list of dicts for template use
+    return [
+        {
+            "id": row[0],
+            "timestamp": row[1],
+            "filename": row[2],
+            "path": row[3]
+        }
+        for row in rows
+    ]
+    
+def insert_snapshot(filename, path):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    timestamp = datetime.now().isoformat()
+    cur.execute("""
+        INSERT INTO snapshots (timestamp, filename, path)
+        VALUES (?, ?, ?)
+    """, (timestamp, filename, path))
+    snapshot_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return snapshot_id
+
+def insert_detection(snapshot_id, label, confidence, bbox, crop_path, species=None):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+    INSERT INTO detections (snapshot_id, label, confidence, bbox, crop_path, species)
+    VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        snapshot_id,
+        label,
+        confidence,
+        str(bbox),
+        crop_path,
+        species
+    ))
+    conn.commit()
+    conn.close()
+
+def insert_manual_label(snapshot_id, x, y, width, height, label):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO manual_labels (snapshot_id, x, y, width, height, label, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (snapshot_id, x, y, width, height, label, datetime.now().isoformat()))
+    conn.commit()
 
 @app.route('/snapshot', methods=['POST'])
 def snapshot():
@@ -246,22 +388,22 @@ def snapshot():
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
             log_event(f"Snapshot taken and saved to {filepath}")
+
+            snapshot_id = insert_snapshot(filename, filepath)
             detections = detect_and_crop(filepath)
             log_event(f"Detected {len(detections)} objects in {filepath}")
             for det in detections:
                 species = None
-                #if det['label'] == 'bird':
-                if 1 == 1:
+                if det['label'] == 'bird':
                     log_event(f"Triggering species classifier for {det['crop_path']}")
                     label, conf = classify_species_chriamue(det['crop_path'])
                     log_event(f"Species: {label} ({conf})")
-                else:
-                    species = None
+                    species = label
                 insert_detection(
+                    snapshot_id=snapshot_id,
                     label=det['label'],
                     confidence=det['confidence'],
                     bbox=det['bbox'],
-                    original_path=filepath,
                     crop_path=det['crop_path'],
                     species=species
                 )
@@ -272,6 +414,72 @@ def snapshot():
     except Exception as e:
         log_event(f"Snapshot error: {str(e)}")
         return jsonify({'error': f'Error: {str(e)}'}), 500
+
+@app.route('/feedback_draw', methods=['POST'])
+def feedback_draw():
+    snapshot_id = int(request.form['snapshot_id'])
+    x = int(request.form['x'])
+    y = int(request.form['y'])
+    width = int(request.form['width'])
+    height = int(request.form['height'])
+    label = request.form['label']
+
+    insert_manual_label(snapshot_id, x, y, width, height, label)
+    return redirect(request.referrer or url_for('snapshots'))
+
+@app.route('/detections')
+def detections():
+    species = request.args.get('species')
+    label = request.args.get('label')
+    min_conf = request.args.get('min_conf', type=float)
+    max_conf = request.args.get('max_conf', type=float)
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
+
+    query = """
+        SELECT s.timestamp, d.label, d.confidence, d.crop_path, d.species,d.feedback, d.feedback_notes,
+               EXISTS (SELECT 1 FROM manual_labels ml WHERE ml.snapshot_id = d.snapshot_id) as has_manual
+        FROM detections d
+        JOIN snapshots s ON d.snapshot_id = s.id
+        WHERE 1=1
+    """
+    params = []
+
+    if species:
+        query += " AND d.species = ?"
+        params.append(species)
+    if label:
+        query += " AND d.label = ?"
+        params.append(label)
+    if min_conf is not None:
+        query += " AND d.confidence >= ?"
+        params.append(min_conf)
+    if max_conf is not None:
+        query += " AND d.confidence <= ?"
+        params.append(max_conf)
+    if start_date:
+        query += " AND s.timestamp >= ?"
+        params.append(start_date)
+    if end_date:
+        query += " AND s.timestamp <= ?"
+        params.append(end_date + "T23:59:59")
+
+    query += " ORDER BY s.timestamp DESC LIMIT 100"
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute(query, params)
+    rows = c.fetchall()
+    conn.close()
+
+    return render_template('detections.html', detections=rows)
+
+@app.route('/snapshots')
+def snapshots():
+    snapshots = get_snapshots_list()
+    labels_by_snapshot = get_manual_labels_for_snapshots()
+    return render_template('snapshots.html', snapshots=snapshots, labels_by_snapshot=labels_by_snapshot)
 
 def gen_frames_sub():
     username = urllib.parse.quote(CAMERA_01_USERNAME)
@@ -298,5 +506,6 @@ def video_feed():
     return Response(gen_frames_sub(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
     init_db()
+    run_periodic_snapshots(interval_seconds=300)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
