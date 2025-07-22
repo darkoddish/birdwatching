@@ -1,20 +1,127 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Snapshots</title>
-</head>
-<body>
-    <h2>Recent Snapshots</h2>
-    <div style="display: flex; flex-wrap: wrap;">
-        {% for timestamp, label, confidence, crop_path, species in detections %}
-            <div style="margin: 10px; border: 1px solid #ccc; padding: 5px;">
-                <img src="{{ url_for('static', filename=crop_path.split('static/')[-1]) }}" width="200"><br>
-                <strong>{{ label }}</strong> ({{ confidence }})<br>
-                {% if species %}<em>Species:</em> {{ species }}<br>{% endif %}
-                <small>{{ timestamp }}</small>
-            </div>
-        {% endfor %}
+{% extends "base.html" %}
+
+{% block title %}Snapshots{% endblock %}
+
+{% block content %}
+<h2>Snapshots</h2>
+
+{% for snapshot in snapshots %}
+  <div style="margin: 20px 0; position: relative;">
+    <h5>{{ snapshot.timestamp }}</h5>
+    <div style="position: relative; display: inline-block;">
+      <img src="{{ url_for('static', filename=snapshot.path.split('static/')[-1]) }}"
+           id="img-{{ snapshot.id }}"
+           data-id="{{ snapshot.id }}"
+           class="draw-img"
+           style="max-width: 640px; border: 1px solid #ccc;">
+      <canvas class="draw-canvas" style="position: absolute; left: 0; top: 0;"></canvas>
     </div>
-    <a href="{{ url_for('dashboard') }}">Back to Dashboard</a>
-</body>
-</html>
+
+    <form method="POST" action="/feedback_draw" class="box-form mt-2">
+      <input type="hidden" name="snapshot_id" value="{{ snapshot.id }}">
+      <input type="hidden" name="x">
+      <input type="hidden" name="y">
+      <input type="hidden" name="width">
+      <input type="hidden" name="height">
+      <label>Label: <input type="text" name="label" required></label>
+      <button type="submit" class="btn btn-sm btn-primary">Submit Box</button>
+    </form>
+  </div>
+{% endfor %}
+
+<script>
+document.querySelectorAll('.draw-img').forEach(img => {
+  const canvas = img.nextElementSibling;
+  const form = img.parentElement.parentElement.querySelector('form');
+  const ctx = canvas.getContext('2d');
+  let startX, startY, isDrawing = false;
+
+  const boundsText = document.createElement('div');
+  boundsText.style.marginTop = '5px';
+  boundsText.style.color = 'green';
+  form.insertBefore(boundsText, form.firstChild);
+
+  function resizeCanvas() {
+    canvas.width = img.offsetWidth;
+    canvas.height = img.offsetHeight;
+  }
+
+  window.addEventListener('resize', resizeCanvas);
+  resizeCanvas();
+
+  canvas.addEventListener('mousedown', e => {
+    isDrawing = true;
+    const rect = canvas.getBoundingClientRect();
+    startX = e.clientX - rect.left;
+    startY = e.clientY - rect.top;
+  });
+
+  canvas.addEventListener('mousemove', e => {
+    if (!isDrawing) return;
+    const rect = canvas.getBoundingClientRect();
+    const currentX = e.clientX - rect.left;
+    const currentY = e.clientY - rect.top;
+
+    const x = Math.min(startX, currentX);
+    const y = Math.min(startY, currentY);
+    const width = Math.abs(currentX - startX);
+    const height = Math.abs(currentY - startY);
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = 'red';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, width, height);
+  });
+
+  canvas.addEventListener('mouseup', e => {
+    if (!isDrawing) return;
+    isDrawing = false;
+    const rect = canvas.getBoundingClientRect();
+    const endX = e.clientX - rect.left;
+    const endY = e.clientY - rect.top;
+
+    const x = Math.round(Math.min(startX, endX));
+    const y = Math.round(Math.min(startY, endY));
+    const width = Math.round(Math.abs(endX - startX));
+    const height = Math.round(Math.abs(endY - startY));
+
+    form.x.value = x;
+    form.y.value = y;
+    form.width.value = width;
+    form.height.value = height;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = 'lime';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, width, height);
+    boundsText.innerText = `x=${x}, y=${y}, w=${width}, h=${height}`;
+  });
+});
+</script>
+
+<!-- Inject labels as JS variable -->
+<script>
+const manualLabels = {{ labels_by_snapshot | tojson }};
+window.addEventListener('load', () => {
+  for (const [snapshotId, boxes] of Object.entries(manualLabels)) {
+    const img = document.querySelector(`#img-${snapshotId}`);
+    const canvas = img?.nextElementSibling;
+    if (!canvas) continue;
+
+    const ctx = canvas.getContext('2d');
+    canvas.width = img.offsetWidth;
+    canvas.height = img.offsetHeight;
+    ctx.strokeStyle = 'lime';
+    ctx.lineWidth = 2;
+    ctx.font = '14px sans-serif';
+    ctx.fillStyle = 'lime';
+
+    boxes.forEach(box => {
+      ctx.strokeRect(box.x, box.y, box.width, box.height);
+      ctx.fillText(box.label, box.x + 4, box.y + 14);
+    });
+  }
+});
+</script>
+
+{% endblock %}
