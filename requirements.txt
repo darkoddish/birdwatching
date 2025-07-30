@@ -7,3 +7,4 @@ psutil
 pillow
 onnxruntime
 numpy
+watchdog

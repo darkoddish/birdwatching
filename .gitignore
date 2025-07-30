@@ -38,3 +38,10 @@ app/static/snapshots/*
 !app/static/snapshots/.gitkeep
 app/static/crops/*
 !app/static/crops/.gitkeep
+app/static/ftp_video/*
+!app/static/ftp_video/.gitkeep
+app/static/ftp_video_processed/*
+!app/static/ftp_video_processed/.gitkeep
+
+# Temp files and folders
+app/temp_frames
