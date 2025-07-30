@@ -13,6 +13,12 @@ import os
 from ultralytics import YOLO
 import sqlite3
 import threading
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+import queue
+import shutil
+
+processing_queue = queue.Queue()
 
 app = Flask(__name__)
 socketio = SocketIO(app, async_mode='threading')
@@ -22,9 +28,21 @@ media_service = camera.create_media_service()
 ptz_service = camera.create_ptz_service()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+os.makedirs(BASE_DIR, exist_ok=True)
 SNAPSHOT_DIR = os.path.join(BASE_DIR, "static", "snapshots")
+os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 CROPS_DIR = os.path.join(BASE_DIR, "static", "crops")
+os.makedirs(CROPS_DIR, exist_ok=True)
+FTP_VIDEO_DIR = os.path.join(BASE_DIR, "static", "ftp_video")
+os.makedirs(FTP_VIDEO_DIR, exist_ok=True)
 GENERAL_CLASSIFIER_PATH = os.path.join(BASE_DIR, "general_classifier", "yolov8n.pt")
+#os.makedirs(GENERAL_CLASSIFIER_PATH, exist_ok=True)
+PROCESSED_MARKER_DIR = os.path.join(BASE_DIR, "static", "ftp_video_processed")
+os.makedirs(PROCESSED_MARKER_DIR, exist_ok=True)
+DB_PATH = os.path.join(BASE_DIR, "data", "birdwatch.db")
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+#touch /home/thjones29/Documents/birdwatching/app/static/ftp_video_processed/test_marker_1.processed
 
 model = YOLO(GENERAL_CLASSIFIER_PATH)
 
@@ -35,8 +53,7 @@ print("SNAPSHOT_DIR =", SNAPSHOT_DIR)
 logs_store = []
 events_store = []
 
-DB_PATH = os.path.join(BASE_DIR, "data", "birdwatch.db")
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
 
 def run_periodic_snapshots(interval_seconds=300):
     def snapshot_loop():
@@ -330,34 +347,40 @@ def get_snapshots_list():
     ]
     
 def insert_snapshot(filename, path):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    timestamp = datetime.now().isoformat()
-    cur.execute("""
-        INSERT INTO snapshots (timestamp, filename, path)
-        VALUES (?, ?, ?)
-    """, (timestamp, filename, path))
-    snapshot_id = cur.lastrowid
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        timestamp = datetime.now().isoformat()
+        cur.execute("""
+            INSERT INTO snapshots (timestamp, filename, path)
+            VALUES (?, ?, ?)
+        """, (timestamp, filename, path))
+        conn.commit()
+        conn.close()
+        snapshot_id = cur.lastrowid
+    except Exception as e:
+        log_event(f"Insert snapshot error: {str(e)}")
     return snapshot_id
 
 def insert_detection(snapshot_id, label, confidence, bbox, crop_path, species=None):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-    INSERT INTO detections (snapshot_id, label, confidence, bbox, crop_path, species)
-    VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        snapshot_id,
-        label,
-        confidence,
-        str(bbox),
-        crop_path,
-        species
-    ))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("""
+        INSERT INTO detections (snapshot_id, label, confidence, bbox, crop_path, species)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            snapshot_id,
+            label,
+            confidence,
+            str(bbox),
+            crop_path,
+            species
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log_event(f"Insert detection error: {str(e)}")
 
 def insert_manual_label(snapshot_id, x, y, width, height, label):
     conn = sqlite3.connect(DB_PATH)
@@ -501,11 +524,141 @@ def gen_frames_sub():
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
+def process_i_frames_from_video(video_path):
+    import subprocess
+
+    base_filename = os.path.splitext(os.path.basename(video_path))[0]
+    frame_output_dir = os.path.join(BASE_DIR, "temp_frames")
+    os.makedirs(frame_output_dir, exist_ok=True)
+
+    output_pattern = os.path.join(frame_output_dir, f"{base_filename}_%04d.jpg")
+    command = [
+        "ffmpeg",
+        "-i", video_path,
+        "-vf", "select='eq(pict_type\\,I)'",
+        "-vsync", "vfr",
+        output_pattern
+    ]
+
+    try:
+        subprocess.run(command, check=True)
+
+        for frame_file in sorted(os.listdir(frame_output_dir)):
+            frame_path = os.path.join(frame_output_dir, frame_file)
+            detections = detect_and_crop(frame_path)
+            log_event(f"Detected {len(detections)} objects in {frame_file}")
+            snapshot_id = insert_snapshot(frame_file, frame_path)
+            log_event(f"7")
+            for det in detections:
+                log_event(f"8")
+                species = None
+                if det['label'] == 'bird':
+                    log_event(f"Triggering species classifier for {det['crop_path']}")
+                    label, conf = classify_species_chriamue(det['crop_path'])
+                    log_event(f"Species: {label} ({conf})")
+                    species = label
+                log_event(f"9")
+                insert_detection(
+                    snapshot_id=snapshot_id,
+                    label=det['label'],
+                    confidence=det['confidence'],
+                    bbox=det['bbox'],
+                    crop_path=det['crop_path'],
+                    species=species
+                )
+                log_event(f"10")
+        log_event(f"Log 1")
+        try:
+            base = os.path.basename(video_path)
+            marker_path = os.path.join(PROCESSED_MARKER_DIR, base + ".processed")
+            with open(marker_path, "w") as f:
+                log_event(f"Writing marker to: {marker_path}")
+                f.write(datetime.now().isoformat())
+            log_event(f"Created marker file: {marker_path}")
+        except Exception as e:
+            log_event(f"ERROR writing marker for {video_path}: {e}")
+        log_event(f"Log 2")
+
+
+    except Exception as e:
+        log_event(f"Error during processing video {video_path}: {e}")
+        log_event(f"Log 3")
+    finally:
+        log_event(f"Log 4")
+        shutil.rmtree(frame_output_dir, ignore_errors=True)
+        os.makedirs(frame_output_dir, exist_ok=True)
+    log_event(f"Log 5")
+
+class FTPVideoHandler(FileSystemEventHandler):
+    def on_created(self, event):
+        if not event.is_directory and event.src_path.endswith('.mp4'):
+            base = os.path.basename(event.src_path)
+            marker_path = os.path.join(PROCESSED_MARKER_DIR, base + ".processed")
+
+            # Wait for the file to stabilize (not grow anymore)
+            prev_size = -1
+            while True:
+                try:
+                    curr_size = os.path.getsize(event.src_path)
+                    if curr_size == prev_size:
+                        break
+                    prev_size = curr_size
+                    time.sleep(1)
+                except Exception as e:
+                    log_event(f"Error waiting for file to stabilize: {e}")
+                    return
+
+            # Now queue it
+            if not os.path.exists(marker_path):
+                log_event(f"Queueing new file for processing: {event.src_path}")
+                processing_queue.put(event.src_path)
+
+
+def start_ftp_video_watcher():
+    observer = Observer()
+    event_handler = FTPVideoHandler()
+    observer.schedule(event_handler, path=FTP_VIDEO_DIR, recursive=False)
+    observer.start()
+    log_event(f"Watching FTP video directory: {FTP_VIDEO_DIR}")
+
+
+def queue_existing_unprocessed_videos():
+    log_event(f"Checking for unprocessed files in: {FTP_VIDEO_DIR}")
+    for f in sorted(os.listdir(FTP_VIDEO_DIR)):
+        full_path = os.path.join(FTP_VIDEO_DIR, f)
+        marker_path = os.path.join(PROCESSED_MARKER_DIR, f + ".processed")
+        log_event(f"Considering file: {f}")
+        if f.endswith(".mp4") and not os.path.exists(marker_path):
+            log_event(f"Queueing unprocessed file on startup: {f}")
+            processing_queue.put(full_path)
+        else:
+            log_event(f"Skipping {f} (already processed or not .mp4)")
+
 @app.route('/video_feed')
 def video_feed():
     return Response(gen_frames_sub(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
+def processing_worker():
+    while True:
+        video_path = processing_queue.get()
+        if not video_path or not os.path.isfile(video_path):
+            log_event(f"Skipping invalid video path: {video_path}")
+            processing_queue.task_done()
+            continue
+        try:
+            log_event(f"Worker processing: {video_path}")
+            process_i_frames_from_video(video_path)
+        except Exception as e:
+            log_event(f"Worker error on {video_path}: {e}")
+        finally:
+            processing_queue.task_done()
+            log_event(f"Worker done processing: {video_path}")
+
+
+
 if __name__ == '__main__':
     init_db()
-    run_periodic_snapshots(interval_seconds=300)
+    start_ftp_video_watcher()
+    queue_existing_unprocessed_videos()
+    threading.Thread(target=processing_worker, daemon=True).start()
     socketio.run(app, host='0.0.0.0', port=5000, debug=True)
